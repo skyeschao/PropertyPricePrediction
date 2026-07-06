@@ -1,0 +1,316 @@
+---
+title: "Hierarchical Model Testing"
+output: html_document
+date: "2025-11-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(tinytex)
+library(purrr)
+library(LaplacesDemon)
+library(rstan)
+library(posterior)
+library(coda)
+library(dplyr)
+library(bayesplot)
+```
+
+```{r}
+#Data
+data <- read_csv("sample.csv")
+```
+
+```{r}
+#Standardize predictors and results
+#data <- data |> mutate( )
+```
+
+
+
+Baseline Structure:
+```{r}
+#Baseline Model
+m0 <- lm(price_score ~ house_size + acre_lot,data = data)
+```
+
+```{r}
+#Summary Baseline Model
+summary(m0)
+```
+
+
+Hierarchical Structure:
+
+```{r}
+#Data prep make sure state and cities are factors
+data <- data |> mutate(state = factor(state),city = factor(city))
+
+```
+
+```{r}
+#Create city and state ids
+city_state_ids <- data |> distinct(state, city) |> arrange(state, city) |> mutate(state_id = as.integer(state),city_id  = row_number())
+
+model_data <- data |> left_join(city_state_ids,by = c("state", "city")) 
+```
+
+```{r}
+#Select relevant variables
+model_data <- model_data |> dplyr::select(price,acre_lot,city,city_id,state,state_id,house_size)
+```
+
+
+
+```{r}
+#Code preparing data
+N <- nrow(model_data)
+S <- length(unique(model_data$state))
+C <- length(unique(model_data$city))
+X <- model.matrix(~ 1 + house_size + acre_lot, data = model_data)
+K <- ncol(X)
+y <- model_data$price
+city_id <- model_data$city_id
+state_id <- model_data$state_id
+
+
+
+
+stan_data <- list(N=N,S=S,C=C,X=X,K=K,y=y,city=city_id,state=state_id)
+
+```
+
+
+```{r}
+#Stan Code
+stan_code <- "
+  data{
+  int<lower=1> N;
+  int<lower=1> S;
+  int<lower=1> C;
+  int<lower=1> K;
+  vector[N] y;
+  matrix[N,K] X;
+  int<lower=1,upper=C> city[N];
+  int<lower=1,upper=S> state[N];
+  }
+  parameters{
+  vector[K] beta_state[S];
+  vector[K] beta_city[C];
+  vector<lower=0>[K] omega;
+  real<lower=0> sigma;
+  vector<lower=0>[K] sigma_city;
+  vector<lower=0>[K] sigma_state;
+  }
+  model{
+  omega ~ normal(0,10);
+  sigma ~ normal(0,10);
+  sigma_city ~ normal(0,5);
+  sigma_state ~ normal(0,5);
+  for(s in 1:S){
+    beta_state[s] ~ normal(omega,sigma_state);
+  }
+  for(c in 1:C){
+    beta_city[c] ~ normal(beta_state[state[c]],sigma_city);
+  }
+  for(n in 1:N){
+    real mu_n;
+    mu_n = X[n] * beta_city[city[n]];
+    y[n] ~ normal(mu_n, sigma);
+  }
+  }
+"
+```
+
+
+```{r}
+#THIS TOOK A REALLY LONG TIME TO RUN!!!
+#Run Stan Code
+sm <- stan_model(model_code = stan_code)
+fit <- sampling(sm,data = stan_data,chains = 4,iter=10000,seed=25)
+```
+
+Results:
+
+```{r}
+#Overall Summary
+print(fit, pars = c("omega", "sigma_state", "sigma_city", "sigma"),probs = c(0.025, 0.5, 0.975))
+```
+
+
+```{r}
+#State coefficients
+print(fit, pars = "beta_state", probs = c(0.025, 0.5, 0.975))
+```
+
+```{r}
+#City coefficients
+print(fit, pars = "beta_city", probs = c(0.025, 0.5, 0.975))
+```
+
+```{r}
+#R^2 calculation
+
+post <- rstan::extract(fit)
+y    <- stan_data$y     
+X    <- stan_data$X     
+N    <- stan_data$N
+city <- stan_data$city  
+
+beta_city_hat <- apply(post$beta_city, c(2, 3), mean)
+
+mu_hat <- numeric(N)
+
+for (n in seq_len(N)) {
+  mu_hat[n] <- X[n, ] %*% beta_city_hat[ city[n], ]
+}
+
+
+residuals_hat <- y - mu_hat
+
+
+RSS <- sum(residuals_hat^2)
+TSS <- sum((y - mean(y))^2)
+
+R2_classic <- 1 - RSS / TSS
+R2_classic
+
+```
+
+
+
+```{r}
+#Store Fit in Data Frame
+draws <- as_draws_df(as.array(fit))
+```
+
+```{r}
+#Effective Sample Size
+ess <-  effectiveSize(draws)
+ess_df <- as.data.frame(ess)
+```
+
+
+Trace Plots:
+
+```{r}
+#Trace Plot for Omega
+parameters <- extract(fit)
+plot(parameters$sigma_city,type = "l")
+```
+
+FIT 2:
+
+
+```{r}
+#Fit2
+#Run Stan Code
+sm2 <- stan_model(model_code = stan_code)
+fit2 <- sampling(sm2,data = stan_data,chains = 4,iter=2000,warmup=1000,seed=25)
+```
+
+```{r}
+#R^2 calculation
+
+post2 <- rstan::extract(fit2)
+y    <- stan_data$y     
+X    <- stan_data$X     
+N    <- stan_data$N
+city <- stan_data$city  
+
+beta_city_hat <- apply(post2$beta_city, c(2, 3), mean)
+
+mu_hat <- numeric(N)
+for (n in seq_len(N)) {
+  mu_hat[n] <- X[n, ] %*% beta_city_hat[ city[n], ]
+}
+
+
+residuals_hat <- y - mu_hat
+
+
+RSS <- sum(residuals_hat^2)
+TSS <- sum((y - mean(y))^2)
+
+R2_classic <- 1 - RSS / TSS
+R2_classic
+```
+
+
+```{r}
+#Trace Plot for Omega
+parameters2 <- extract(fit2)
+plot(parameters2$sigma,type = "l")
+```
+
+
+```{r}
+mcmc_trace(as.array(fit2), pars = "sigma")
+```
+
+```{r}
+summ <- summary(fit2, pars = "sigma")$summary
+summ[, c("mean", "sd", "n_eff", "Rhat")]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

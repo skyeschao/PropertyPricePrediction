@@ -1,0 +1,107 @@
+---
+title: "Final Project"
+output: html_document
+date: "2025-11-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+data <- read_csv("realtor-data.zip.csv")
+```
+
+```{r}
+data |> filter(state == "Massachusetts") |> summarise(count = n())
+```
+
+```{r}
+data |> filter(state == "California") |> summarise(count = n())
+```
+
+```{r}
+data |> filter(state == "Michigan") |> summarise(count = n())
+```
+
+```{r}
+data |> filter(state == "Texas") |> summarise(count = n())
+```
+
+```{r}
+data |> filter(state == "Florida") |> summarise(count = n())
+```
+
+
+
+
+
+```{r}
+data |> filter(state == "California") |> group_by(city) |> summarise(count=n()) |> arrange(desc(count))
+```
+
+```{r}
+data |> filter(state == "Massachusetts") |> group_by(city) |> summarise(count=n()) |> arrange(desc(count))
+```
+
+```{r}
+data |> filter(state == "Michigan") |> group_by(city) |> summarise(count=n()) |> arrange(desc(count))
+```
+
+```{r}
+data |> filter(state == "Texas") |> group_by(city) |> summarise(count=n()) |> arrange(desc(count))
+```
+
+```{r}
+data |> filter(state == "Florida") |> group_by(city) |> summarise(count=n()) |> arrange(desc(count))
+```
+
+```{r}
+Miami <- data |> filter(state == "Florida" & city == "Miami")
+```
+
+```{r}
+AnnArbor <- data |> filter(state == "Michigan" & city == "Ann Arbor")
+```
+
+```{r}
+Boston <-  data |> filter(state == "Massachusetts" & city == "Boston")
+```
+
+```{r}
+LA <- data |> filter(state == "California" & city == "Los Angeles")
+```
+
+```{r}
+Houston <- data |> filter(state == "Texas" & city == "Houston")
+```
+
+
+
+```{r}
+LA |> ggplot(aes(x=price)) + geom_histogram() + xlim(0, 5000000) + theme_minimal()
+```
+
+```{r}
+Boston |> ggplot(aes(x=price)) + geom_histogram() + xlim(0, 5000000) + theme_minimal()
+```
+
+
+
+```{r}
+AnnArbor |> ggplot(aes(x=price)) +  geom_histogram() + xlim(0, 5000000) + theme_minimal()
+```
+
+
+
+
+```{r}
+Miami |> ggplot(aes(x=price)) + geom_histogram() + xlim(0, 5000000) + theme_minimal()
+```
+
+```{r}
+Houston |> ggplot(aes(x=price)) + geom_histogram() + xlim(0, 5000000) + theme_minimal()
+```
+
+
+

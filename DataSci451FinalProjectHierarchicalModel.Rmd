@@ -1,0 +1,531 @@
+---
+title: "FinalProjectHierarchicalModel"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-11-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(tinytex)
+library(purrr)
+library(LaplacesDemon)
+library(rstan)
+library(posterior)
+library(coda)
+library(dplyr)
+library(bayesplot)
+library(scales)
+library(reshape2)
+library(corrplot)
+
+```
+
+```{r}
+#Load Data
+data <- read_csv("sample5k.csv")
+```
+```{r}
+data <- data |> mutate(logsize = log(house_size))
+```
+
+
+
+
+```{r}
+#Histogram of House Pirces
+data |> ggplot(aes(x=price)) + geom_histogram(fill="lightblue",color="black") + scale_x_continuous(labels = label_comma()) + labs(title = "Distribution of Houses Prices in Sample") + theme_minimal() 
+```
+
+
+
+```{r}
+#Correlation Matrix
+corr_mat <- data |> dplyr::select(bed, bath, acre_lot, house_size) |>cor(use = "complete.obs")
+
+corrplot(corr_mat,method = "color",addCoef.col = "black", tl.col = "black")
+
+```
+
+
+
+
+```{r}
+data |> ggplot(aes(x=acre_lot,y=house_size)) + geom_point() + labs(x="acres", y= "square feet", title = "Relationship Between Acres and Square Feet") + theme_minimal()
+```
+
+```{r}
+data |> ggplot(aes(x=acre_lot,y=logsize)) + geom_point() + labs(x="acres", y= "log square feet", title = "Relationship Between Acres and Log Square Feet") + theme_minimal()
+```
+
+
+
+
+Data Preparing:
+```{r}
+#Select Relevant Variables
+data <- data |> dplyr::select(price,acre_lot,city,state,house_size)
+```
+
+```{r}
+#Add zscore variables
+data <- data |> mutate(price_score = (price - mean(price))/sd(price), acre_score = (acre_lot - mean(acre_lot))/sd(acre_lot), size_score = (house_size - mean(house_size))/sd(house_size))
+```
+
+
+```{r}
+#Data Summary
+summary(data)
+```
+
+
+Baseline Model:
+```{r}
+#Code for baseline model
+m0 <- lm(price_score ~ size_score + acre_score,data = data)
+```
+
+```{r}
+#Results
+summary(m0)
+```
+
+Hierarchical Data Prep:
+
+```{r}
+#Data prep make sure state and cities are factors
+data <- data |> mutate(state = factor(state),city = factor(city))
+
+```
+
+```{r}
+#Create city and state ids
+city_state_ids <- data |> distinct(state, city) |> arrange(state, city) |> mutate(state_id = as.integer(state),city_id  = row_number())
+
+model_data <- data |> left_join(city_state_ids,by = c("state", "city")) 
+```
+
+
+```{r}
+#Code preparing data
+N <- nrow(model_data)
+S <- length(unique(model_data$state))
+C <- length(unique(model_data$city))
+X <- model.matrix(~ 1 + size_score + acre_score, data = model_data)
+K <- ncol(X)
+y <- model_data$price_score
+city_id <- model_data$city_id
+state_id <- model_data$state_id
+
+stan_data <- list(N=N,S=S,C=C,X=X,K=K,y=y,city=city_id,state=state_id)
+```
+
+```{r}
+#Stan Code
+stan_code <- "
+  data{
+  int<lower=1> N;
+  int<lower=1> S;
+  int<lower=1> C;
+  int<lower=1> K;
+  vector[N] y;
+  matrix[N,K] X;
+  int<lower=1,upper=C> city[N];
+  int<lower=1,upper=S> state[N];
+  }
+  parameters{
+  vector[K] beta_state[S];
+  vector[K] beta_city[C];
+  vector[K] omega;
+  real<lower=0> sigma;
+  vector<lower=0>[K] sigma_city;
+  vector<lower=0>[K] sigma_state;
+  }
+  model{
+  omega ~ normal(0,2);
+  sigma ~ normal(0,1);
+  sigma_city ~ normal(0,1);
+  sigma_state ~ normal(0,1);
+  for(s in 1:S){
+    beta_state[s] ~ normal(omega,sigma_state);
+  }
+  for(c in 1:C){
+    beta_city[c] ~ normal(beta_state[state[c]],sigma_city);
+  }
+  for(n in 1:N){
+    real mu_n;
+    mu_n = X[n] * beta_city[city[n]];
+    y[n] ~ normal(mu_n, sigma);
+  }
+  }
+"
+```
+
+```{r}
+#Run Stan Code
+sm <- stan_model(model_code = stan_code)
+fit <- sampling(sm,data = stan_data,chains = 4,iter=2000,seed=25)
+```
+Results:
+In sample R^2 for hierarchical model
+
+```{r}
+#Calcultion for R^2
+parameters <- extract(fit)
+y <- stan_data$y     
+X <- stan_data$X     
+N <- stan_data$N
+city <- stan_data$city
+mu_hat <- numeric(N)
+
+beta_city_hat <- apply(parameters$beta_city, c(2, 3), mean)
+for (n in seq_len(N)) {
+  mu_hat[n] <- X[n, ] %*% beta_city_hat[ city[n], ]
+}
+residuals_hat <- y - mu_hat
+RSS <- sum(residuals_hat^2)
+TSS <- sum((y - mean(y))^2)
+
+R2 <- 1 - RSS / TSS
+R2
+
+```
+
+
+Visualization
+
+```{r}
+#Store results in df
+draws <- as_draws_df(as.array(fit))
+```
+
+Histograms of posterior house with 0.2 acres and 1600 square feet price predictions for different cities: 
+
+```{r}
+#Scores for given house
+house_acre_score <- (0.2-mean(model_data$acre_lot))/sd(model_data$acre_lot) 
+house_size_score <- (1600-mean(model_data$house_size))/sd(model_data$house_size) 
+X_house <- c(1,house_acre_score,house_size_score)
+```
+
+
+```{r}
+#Boston Posterior data
+boston_id <- 21
+beta_boston <- parameters$beta_city[,boston_id,]
+beta_boston_df <- as.data.frame(beta_boston)
+beta_boston_df <- beta_boston_df |> rename("V1Boston" = "V1","V2Boston" = "V2","V3Boston" = "V3")
+mu_draws_boston <- beta_boston %*% X_house
+boston_df <- as.data.frame(mu_draws_boston)
+boston_df <- boston_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+boston_df <- boston_df |> rename("V1Boston" = "V1","priceBoston" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+boston_df |> ggplot(aes(x=priceBoston)) + geom_histogram(fill="red",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Boston") + theme_minimal()
+```
+
+```{r}
+#San Francisco Posterior data
+sf_id <- 8
+beta_sf <- parameters$beta_city[,sf_id,]
+beta_sf_df <- as.data.frame(beta_sf)
+beta_sf_df <- beta_sf_df |> rename("V1SF" = "V1","V2SF" = "V2","V3SF" = "V3")
+mu_draws_sf <- beta_sf %*% X_house
+sf_df <- as.data.frame(mu_draws_sf)
+sf_df <- sf_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+sf_df <- sf_df |> rename("V1SF" = "V1","priceSF" = "price")
+
+
+```
+
+```{r}
+#Histogram of Posterior Price
+sf_df |> ggplot(aes(x=priceSF)) + geom_histogram(fill="orange",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in San Francisco") + theme_minimal()
+```
+
+```{r}
+#Los Angeles Posterior data
+la_id <- 2
+beta_la <- parameters$beta_city[,la_id,]
+mu_draws_la <- beta_la %*% X_house
+la_df <- as.data.frame(mu_draws_la)
+la_df <- la_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+la_df <- la_df |> rename("V1LA" = "V1","priceLA" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+la_df |> ggplot(aes(x=priceLA)) + geom_histogram(fill="dodgerblue1",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Los Angeles") + theme_minimal()
+```
+
+```{r}
+#Detroit Posterior data
+detroit_id <- 33
+beta_detroit <- parameters$beta_city[,detroit_id,]
+beta_detroit_df <- as.data.frame(beta_detroit)
+mu_draws_detroit <- beta_detroit %*% X_house
+detroit_df <- as.data.frame(mu_draws_detroit)
+detroit_df <- detroit_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+detroit_df <- detroit_df |> rename("V1Detroit" = "V1","priceDetroit" = "price")
+```
+
+
+```{r}
+#Histogram of Posterior Price
+detroit_df |> ggplot(aes(x=priceDetroit)) + geom_histogram(fill="coral",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Detroit") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+```{r}
+#Ann Arbor Posterior data
+aa_id <- 31
+beta_aa <- parameters$beta_city[,aa_id,]
+mu_draws_aa <- beta_aa %*% X_house
+aa_df <- as.data.frame(mu_draws_aa)
+aa_df <- aa_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+aa_df <- aa_df |> rename("V1AA" = "V1","priceAA" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+aa_df |> ggplot(aes(x=priceAA)) + geom_histogram(fill="yellow",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Ann Arbor") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+```{r}
+#Houston Posterior data
+houston_id <- 47
+beta_houston <- parameters$beta_city[,houston_id,]
+mu_draws_houston <- beta_houston %*% X_house
+houston_df <- as.data.frame(mu_draws_houston)
+houston_df <- houston_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+houston_df <- houston_df |> rename("V1Houston" = "V1","priceHouston" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+houston_df |> ggplot(aes(x=priceHouston)) + geom_histogram(fill="magenta",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Houston") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+```{r}
+#Dallas Posterior data
+dallas_id <- 44
+beta_dallas <- parameters$beta_city[,dallas_id,]
+mu_draws_dallas <- beta_dallas %*% X_house
+dallas_df <- as.data.frame(mu_draws_dallas)
+dallas_df <- dallas_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+dallas_df <- dallas_df |> rename("V1Dallas" = "V1","priceDallas" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+dallas_df |> ggplot(aes(x=priceDallas)) + geom_histogram(fill="cyan1",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Dallas") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+```{r}
+#San Antonio
+sa_id <- 49
+beta_sa <- parameters$beta_city[,sa_id,]
+mu_draws_sa <- beta_sa %*% X_house
+sa_df <- as.data.frame(mu_draws_sa)
+sa_df <- sa_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+sa_df <- sa_df |> rename("V1SA" = "V1","priceSA" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+sa_df |> ggplot(aes(x=priceSA)) + geom_histogram(fill="darkgreen",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in San Antonio") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+
+
+
+```{r}
+#Miami Posterior data
+miami_id <- 13
+beta_miami <- parameters$beta_city[,miami_id,]
+mu_draws_miami <- beta_miami %*% X_house
+miami_df <- as.data.frame(mu_draws_miami)
+miami_df <- miami_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+miami_df <- miami_df |> rename("V1Miami" = "V1","priceMiami" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+miami_df |> ggplot(aes(x=priceMiami)) + geom_histogram(fill="beige",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Miami") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+```{r}
+#Tampa Posterior data
+tampa_id <- 20
+beta_tampa <- parameters$beta_city[,tampa_id,]
+mu_draws_tampa <- beta_tampa %*% X_house
+tampa_df <- as.data.frame(mu_draws_tampa)
+tampa_df <- tampa_df |> mutate(price = V1*sd(model_data$price)+mean(model_data$price))
+tampa_df <- tampa_df |> rename("V1Tampa" = "V1","priceTampa" = "price")
+```
+
+```{r}
+#Histogram of Posterior Price
+tampa_df |> ggplot(aes(x=priceTampa)) + geom_histogram(fill="lightgreen",color="black") + labs(x="price",y="frequency",title="Posterior Price Prediction for Described House in Tampa") + scale_x_continuous(labels = label_comma()) + theme_minimal()
+```
+
+
+
+
+Trace Plots:
+
+```{r}
+#Trace Plot for Omega
+plot(parameters$omega[,3],type = "l")
+```
+
+
+```{r}
+#Trace Plot for Sigma
+plot(parameters$sigma,type = "l",xlab = "iterations",ylab = "sigma",main="Trace Plot for Sigma")
+```
+
+```{r}
+#Trace Plot for sigma city
+plot(parameters$sigma_city[,1],type = "l",xlab = "iterations",ylab = "sigma city",main="Trace Plot for Sigma City")
+```
+```{r}
+#Trace Plot for sigma state
+plot(parameters$sigma_state[,1],type = "l",xlab = "iterations",ylab = "sigma state",main="Trace Plot for Sigma State")
+```
+
+
+
+Effective Sample Size:
+
+```{r}
+#ESS Data
+ess <-  effectiveSize(draws)
+ess_df <- as.data.frame(ess)
+```
+
+
+
+
+```{r}
+#Ess for all parameters
+ess_parameters <- ess_df |> slice(1:(n() - 4))
+```
+
+
+```{r}
+ess_parameters |> ggplot(aes(x=ess)) + geom_boxplot() + theme_minimal() + theme(axis.title.y = element_blank(),axis.text.y  = element_blank(),axis.ticks.y = element_blank(),axis.line.y  = element_blank()) + labs(x="Effective Sample Size",title="Effective Sample Sizes for all Parameters in Hiearchical Model")
+```
+
+```{r}
+ess_parameters |> ggplot(aes(x=ess)) + geom_histogram(fill="lightblue",color="black") + theme_minimal() + theme(axis.title.y = element_blank(),axis.text.y  = element_blank(),axis.ticks.y = element_blank(),axis.line.y  = element_blank()) + labs(x="Effective Sample Size",title="Effective Sample Sizes for all Parameters in Hiearchical Model")
+```
+
+
+
+Posterior confidence intervals for given house:
+
+```{r}
+#Scores for given house
+house_acre_score <- (0.2-mean(model_data$acre_lot))/sd(model_data$acre_lot) 
+house_size_score <- (1600-mean(model_data$house_size))/sd(model_data$house_size) 
+X_house <- c(1,house_acre_score,house_size_score)
+```
+
+```{r}
+#ids
+boston_id <- 21
+sf_id <- 8
+la_id <- 2
+detroit_id <- 33
+aa_id <- 31
+houston_id <- 47
+dallas_id <- 44
+miami_id <- 13
+tampa_id <- 20
+sa_id <- 49
+
+```
+
+```{r}
+#Combine cities df
+main_cities_df <- bind_cols(boston_df,sf_df,la_df,detroit_df,aa_df,houston_df,dallas_df,sa_df,miami_df,tampa_df)
+
+main_cities_df <- main_cities_df |> dplyr::select(priceBoston,priceSF,priceLA,priceDetroit,priceAA,priceHouston,priceDallas,priceSA,priceMiami,priceTampa)
+
+main_cities_summary_df <- main_cities_df |> pivot_longer(cols = everything(),names_to = "city",values_to = "price") |> group_by(city) |> summarise(mean = mean(price),lower = quantile(price, 0.025),upper = quantile(price, 0.975),.groups = "drop") |>  mutate(city = recode(city,priceBoston  = "Boston",priceSF = "San Francisco",priceLA  = "Los Angeles",priceDetroit = "Detroit",priceAA = "Ann Arbor", priceHouston = "Houston",
+priceDallas  = "Dallas", priceSA   = "San Antonio",priceMiami = "Miami",priceTampa  = "Tampa"), city = factor(city, levels = c("Boston","San Francisco","Los Angeles","Detroit",
+"Ann Arbor","Houston","Dallas","San Antonio","Miami","Tampa")))
+```
+
+```{r}
+#95% Posterior CIs for each city
+
+ggplot(main_cities_summary_df, aes(y = city, x = mean, xmin = lower, xmax = upper)) + geom_point() + geom_errorbar() +labs(x = "Posterior Price Prediction",y = "",
+  title = "Posterior 95% Confidence Intervals for Select Cities") + theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
